@@ -56,13 +56,10 @@ In plain words:
 ## Install
 
 ```bash
-# 1. the SDK
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python 'novita-sandbox>=2.1.0,<3'
+# 1. install the plugin — clones into ~/.hermes/plugins/ and offers to enable it
+hermes plugins install dipandhali2021/hermes-novita-sandbox
 
-# 2. enable the plugin (user plugins are opt-in)
-hermes plugins enable novita-sandbox
-
-# 3. configure it interactively, then activate
+# 2. configure it — installs the SDK, stores your key, picks a template, verifies
 hermes novita-sandbox setup
 ```
 
@@ -70,11 +67,32 @@ hermes novita-sandbox setup
 the live API with a throwaway sandbox) → template choice → backend selection →
 an end-to-end verification through `NovitaEnvironment`.
 
+To update later:
+
+```bash
+hermes plugins update novita-sandbox     # git pull inside the plugin dir
+```
+
 Non-interactive:
 
 ```bash
 hermes novita-sandbox setup --api-key sk_... --yes
 ```
+
+<details>
+<summary>Manual install (without <code>hermes plugins install</code>)</summary>
+
+```bash
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python 'novita-sandbox>=2.1.0,<3'
+hermes plugins enable novita-sandbox
+hermes novita-sandbox setup
+```
+
+Note that user plugins are opt-in: a directory under `~/.hermes/plugins/` does
+not load unless its key is in `plugins.enabled` in `config.yaml`. The
+`hermes plugins install` route handles that for you (it prompts to enable).
+
+</details>
 
 ## Usage
 
@@ -83,6 +101,10 @@ hermes novita-sandbox doctor             # probe report + config + checks
 hermes novita-sandbox doctor --sandboxes # ...and the sandboxes on your account
 hermes novita-sandbox doctor --live      # also create a real sandbox
 hermes novita-sandbox install-template   # build a custom cpu/memory template
+
+# cost control: pause (or delete) every sandbox this plugin created
+hermes novita-sandbox stop --all
+hermes novita-sandbox stop --all --delete
 
 # add Novita to `hermes setup`'s terminal backend menu (see below)
 hermes novita-sandbox patch-setup
@@ -316,7 +338,7 @@ and the dashboard dropdown do not list `novita`. Use
 |---|---|
 | `terminal` says the tool is unavailable | `hermes novita-sandbox doctor` — a pivotal probe failed, or `NOVITA_API_KEY` is unset |
 | `NOVITA_API_KEY is not set` | run `hermes novita-sandbox setup` |
-| `novita-sandbox is not installed` | see Install step 1 |
+| `novita-sandbox is not installed` | run `hermes novita-sandbox setup` (installs the SDK) |
 | terminal calls blocked with a "backend unavailable" message | a Hermes update changed an internal; `doctor` names the drifted probe |
 | Commands run locally instead of in Novita | `terminal.backend` is not `novita` |
 | `Unknown TERMINAL_ENV: novita` | the plugin is not enabled: `hermes plugins enable novita-sandbox`, then restart |
@@ -325,12 +347,14 @@ and the dashboard dropdown do not list `novita`. Use
 
 | File | Role |
 |---|---|
+| `plugin.yaml` | manifest (`kind: standalone`, `manifest_version: 1`) |
+| `after-install.md` | shown by `hermes plugins install` right after installing |
 | `environment.py` | `NovitaEnvironment(BaseEnvironment)` — no Hermes internals, no patching |
 | `inject.py` | runtime routing: 7 capability-probed patches + unavailability guard |
 | `config.py` | `terminal.*` + `NOVITA_API_KEY` resolution |
-| `cli.py` | `hermes novita-sandbox setup\|doctor\|install-template\|patch-setup\|unpatch-setup` |
+| `cli.py` | `hermes novita-sandbox setup\|doctor\|install-template\|stop\|patch-setup\|unpatch-setup` |
 | `probes/integration_check.py` | live end-to-end check (creates a real sandbox) |
-| `tests/` | 65 offline tests; the inject suite simulates internals changing |
+| `tests/` | offline tests; the inject suite simulates Hermes internals changing |
 
 ## Tests
 

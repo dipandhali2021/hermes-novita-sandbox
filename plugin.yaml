@@ -1,4 +1,5 @@
 name: novita-sandbox
+manifest_version: 1
 version: "0.1.0"
 description: "Run Hermes' terminal inside Novita Agent Sandbox. Adds 'novita' as a terminal backend (alongside local, docker, singularity, modal, daytona, ssh) with pause/resume filesystem persistence. Installs entirely under ~/.hermes/plugins/ and modifies no Hermes source file, so 'hermes update' (git fetch --depth 1 + git reset --hard) cannot revert it: routing is done at runtime through seven individually capability-probed patches, and a revert in Hermes internals makes one probe report a failure and disable the backend rather than break the install."
 author: "dipandhali"
