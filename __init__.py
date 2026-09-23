@@ -52,6 +52,23 @@ def register(ctx) -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning("novita-sandbox: CLI registration failed: %s", e, exc_info=True)
 
+    # Detect, never auto-repair: if the user applied the `hermes setup` menu
+    # patch and a Hermes update has since reverted it (git reset --hard), say so
+    # once per process. Re-adding it here would mean silently rewriting a core
+    # file at startup, which a plugin must not do.
+    try:
+        from . import setup_patch
+
+        if setup_patch.detect().get("state") == "reverted":
+            logger.warning(
+                "novita-sandbox: the `hermes setup` menu patch was reverted "
+                "(most likely by `hermes update`). The backend still works; the "
+                "Novita row is missing from the setup menu. Re-run "
+                "`hermes novita-sandbox patch-setup` to restore it."
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("novita-sandbox: setup-patch check skipped: %s", e)
+
 
 def get_report():
     """The latest InjectionReport, or None if register() has not run."""

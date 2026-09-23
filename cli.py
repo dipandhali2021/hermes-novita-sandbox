@@ -265,6 +265,15 @@ def cmd_doctor(args: Any = None) -> int:
     _say(f"  {_health_icon(key_present)} NOVITA_API_KEY set")
     _say(f"  {_health_icon(bool(_find_uv()))} uv available (for installs)")
 
+    try:
+        from . import setup_patch
+
+        _say("")
+        _say("Setup menu integration")
+        _say(f"  {setup_patch.status_line()}")
+    except Exception as e:  # noqa: BLE001
+        _say(f"  setup menu: check unavailable ({e})")
+
     if not report.available:
         _say("")
         _say("The backend is DISABLED because a pivotal probe failed. Hermes will")
@@ -499,11 +508,66 @@ def cmd_setup(args: Any) -> int:
     return 0
 
 
+def cmd_patch_setup(args: Any) -> int:
+    """Add the Novita row to `hermes setup`'s terminal backend menu.
+
+    Edits hermes_cli/setup.py, which `hermes update` reverts -- see the
+    setup_patch module docstring for why there is no alternative.
+    """
+    from . import setup_patch
+
+    _say("")
+    _say("Novita sandbox backend -- setup menu integration")
+    _say("=" * 60)
+
+    info = setup_patch.detect()
+    _say(f"  target: {info.get('path', '(not found)')}")
+    _say(f"  state : {info['state']}")
+    if info.get("detail"):
+        _say(f"          {info['detail']}")
+    _say("")
+
+    if info["state"] == "shape_unknown":
+        _say("REFUSED. Hermes' setup wizard no longer matches the shape this")
+        _say("plugin knows how to patch, so nothing was changed. Update the")
+        _say("plugin, or use `hermes novita-sandbox setup` instead.")
+        return 1
+
+    if info["state"] == "no_setup_module" or info["state"] == "unreadable":
+        _say("Cannot patch. Use `hermes novita-sandbox setup` instead.")
+        return 1
+
+    ok, message = setup_patch.apply()
+    _say(("OK: " if ok else "FAILED: ") + message)
+    if not ok:
+        return 1
+
+    _say("")
+    _say("Novita now appears in `hermes setup` -> Terminal Backend, and selecting")
+    _say("it prompts for the API key, installs the SDK, and enables the plugin.")
+    _say("")
+    _say("NOTE: `hermes update` runs git reset --hard, which reverts this edit.")
+    _say("      Re-run `hermes novita-sandbox patch-setup` after any update.")
+    _say("      `hermes novita-sandbox doctor` reports it as MISSING if that")
+    _say("      happens. Undo with `hermes novita-sandbox unpatch-setup`.")
+    return 0
+
+
+def cmd_unpatch_setup(args: Any) -> int:
+    from . import setup_patch
+
+    ok, message = setup_patch.revert()
+    _say(("OK: " if ok else "FAILED: ") + message)
+    return 0 if ok else 1
+
+
 _COMMANDS = {
     "setup": cmd_setup,
     "doctor": cmd_doctor,
     "status": cmd_status,
     "install-template": cmd_install_template,
+    "patch-setup": cmd_patch_setup,
+    "unpatch-setup": cmd_unpatch_setup,
 }
 
 
@@ -528,6 +592,15 @@ def _setup_parser(parser: Any) -> None:
     install.add_argument("--image", default=DEFAULT_IMAGE)
     install.add_argument("--cpu", type=int, default=2)
     install.add_argument("--memory", type=int, default=4096)
+
+    subparsers.add_parser(
+        "patch-setup",
+        help="Add Novita to `hermes setup`'s terminal backend menu",
+    )
+    subparsers.add_parser(
+        "unpatch-setup",
+        help="Remove the Novita row from `hermes setup`'s menu",
+    )
 
 
 def _dispatch(args: Any) -> int:

@@ -58,10 +58,65 @@ hermes novita-sandbox doctor --live      # also create a real sandbox
 hermes novita-sandbox status             # sandboxes on your account
 hermes novita-sandbox install-template   # build a custom cpu/memory template
 
+# add Novita to `hermes setup`'s terminal backend menu (see below)
+hermes novita-sandbox patch-setup
+hermes novita-sandbox unpatch-setup
+
 # activate / revert
 hermes config set terminal.backend novita
 hermes config set terminal.backend local
 ```
+
+## The `hermes setup` menu row (read this)
+
+Selecting **Novita** from `hermes setup` → *Terminal Backend* requires editing
+`hermes_cli/setup.py`. That is not a shortcut — Hermes offers **no extension
+point** for it: the menu is built from function-local literals inside
+`setup_terminal_backend()`, and none of the 20 lifecycle hooks fires during
+setup. (Platform plugins do get a `setup_fn`, but that path is for gateway
+adapters, not terminal backends.)
+
+So `patch-setup` makes the edit in the most conservative way available:
+
+- **two insertions only** — a menu entry and a handler arm;
+- **pure additions** — no upstream line is modified or reordered;
+- anchored on existing lines, and **refused** if an anchor is missing or
+  appears more than once, or if the result would not parse;
+- idempotent, with a one-time backup (`setup.py.novita-orig`);
+- `unpatch-setup` removes the blocks by marker and restores the file byte for
+  byte.
+
+Once applied, `hermes setup` shows:
+
+```
+Select terminal backend:
+   (○) Local - run directly on this machine (default)
+   ...
+   (○) Singularity/Apptainer - HPC-friendly container
+   (○) Novita - Novita Agent Sandbox (cloud)
+ → (●) Keep current (local)
+```
+
+and choosing it prompts for the API key (masked), installs the SDK, sets
+`novita_template`, and adds `novita-sandbox` to `plugins.enabled` so the
+selection is not inert.
+
+### An update will revert it — and you will be told
+
+`hermes update` runs `git reset --hard`, which erases the edit. That is handled
+by **detection, never by silent self-repair** — the plugin does not rewrite core
+files at startup. Once you have applied the patch, it records that fact, and if
+the markers later disappear it:
+
+- logs one WARNING at plugin load,
+- reports `[FAIL] setup menu: patch was reverted …` from `hermes novita-sandbox doctor`.
+
+Re-apply with `hermes novita-sandbox patch-setup`. **The backend itself is
+unaffected** — only the menu row is missing.
+
+Prefer not to touch a core file at all? Skip both `patch-setup` and
+`unpatch-setup` and use `hermes novita-sandbox setup`, which does the same job.
+Nothing else in the plugin depends on the patch.
 
 ## Configuration (`~/.hermes/config.yaml`)
 
