@@ -24,8 +24,18 @@ from novita_setup_patch import (
     status_line,
 )
 
+# Module level must provide the helpers the inserted handler arm calls --
+# the real setup.py imports all of these, so the fixture must too, or the
+# semantic precheck would be tested against a shape that cannot occur.
+MODULE_HEADER = (
+    "from hermes_cli.cli_output import print_success, print_info, print_warning\n"
+    "from hermes_cli.config import get_env_value, save_env_value\n"
+    "from hermes_cli.prompts import prompt, prompt_yes_no, prompt_choice\n"
+    "\n"
+)
+
 # A faithful stand-in for the real shape of setup_terminal_backend().
-SYNTHETIC = (
+SYNTHETIC_BODY = (
     "def setup_terminal_backend(config: dict):\n"
     "    terminal_choices = [\n"
     '        "Local - run directly on this machine (default)",\n'
@@ -53,6 +63,8 @@ SYNTHETIC = (
     "\n"
     "    return None\n"
 )
+
+SYNTHETIC = MODULE_HEADER + SYNTHETIC_BODY
 
 
 @pytest.fixture
@@ -322,3 +334,174 @@ def test_status_line_covers_every_state(patched_env, monkeypatch, state, expecte
         "novita_setup_patch.detect", lambda: {"state": state, "detail": "d"}
     )
     assert status_line().startswith(expected)
+
+
+# ----------------------------------------------------------------------
+# semantic preconditions (what makes auto-re-apply safe)
+# ----------------------------------------------------------------------
+
+
+def test_semantic_precheck_passes_on_the_real_wizard(patched_env):
+    from novita_setup_patch import semantic_precheck
+
+    ok, detail = semantic_precheck(SYNTHETIC)
+    assert ok, detail
+
+
+def test_semantic_precheck_catches_renamed_local(patched_env):
+    """Anchors intact but `next_idx` renamed: injecting would raise NameError."""
+    from novita_setup_patch import semantic_precheck
+
+    renamed = SYNTHETIC.replace("next_idx", "next_backend_index")
+
+    ok, detail = semantic_precheck(renamed)
+
+    assert not ok
+    assert "next_idx" in detail
+
+
+def test_semantic_precheck_catches_missing_helper(patched_env):
+    from novita_setup_patch import semantic_precheck
+
+    # The helper is no longer provided anywhere: not imported, not defined.
+    stripped = SYNTHETIC.replace(
+        "from hermes_cli.cli_output import print_success, print_info, print_warning\n",
+        "from hermes_cli.cli_output import print_info, print_warning\n",
+    )
+
+    ok, detail = semantic_precheck(stripped)
+
+    assert not ok
+    assert "print_success" in detail
+
+
+def test_semantic_precheck_catches_missing_function(patched_env):
+    from novita_setup_patch import semantic_precheck
+
+    ok, detail = semantic_precheck("x = 1\n")
+
+    assert not ok
+    assert "setup_terminal_backend" in detail
+
+
+def test_apply_refuses_when_a_required_local_was_renamed(patched_env):
+    """The guard that matters: refuse rather than break `hermes setup`."""
+    patched_env.write_text(SYNTHETIC.replace("next_idx", "next_backend_index"))
+
+    ok, message = apply()
+
+    assert not ok
+    assert "refusing to patch" in message
+    assert "next_idx" in message
+    assert "next_backend_index" in patched_env.read_text()  # file untouched
+
+
+# ----------------------------------------------------------------------
+# automatic re-application after an update
+# ----------------------------------------------------------------------
+
+
+def test_ensure_applied_does_nothing_when_never_applied(patched_env):
+    from novita_setup_patch import ensure_applied
+
+    outcome = ensure_applied()
+
+    assert outcome["action"] == "none"
+    assert not is_patched(patched_env.read_text()), "must not patch unbidden"
+
+
+def test_ensure_applied_does_nothing_when_already_patched(patched_env):
+    from novita_setup_patch import ensure_applied
+
+    apply()
+    outcome = ensure_applied()
+
+    assert outcome["action"] == "none"
+    assert outcome["state"] == "patched"
+
+
+def test_ensure_applied_restores_after_an_update(patched_env):
+    """apply -> update reverts (git reset --hard) -> next start re-applies."""
+    from novita_setup_patch import ensure_applied
+
+    apply()
+    patched_env.write_text(SYNTHETIC)  # simulate `hermes update`
+
+    outcome = ensure_applied()
+
+    assert outcome["action"] == "applied", outcome
+    assert is_patched(patched_env.read_text())
+    assert "Novita - Novita Agent Sandbox (cloud)" in patched_env.read_text()
+    ast.parse(patched_env.read_text())
+
+
+def test_ensure_applied_respects_the_disable_switch(patched_env):
+    import novita_setup_patch as sp
+
+    apply()
+    patched_env.write_text(SYNTHETIC)
+    sp.auto_reapply_enabled = lambda: False
+
+    outcome = sp.ensure_applied()
+
+    assert outcome["action"] == "skipped"
+    assert not is_patched(patched_env.read_text())
+
+
+def test_ensure_applied_reports_failure_without_raising(patched_env):
+    import novita_setup_patch as sp
+
+    apply()
+    # Shape changed too much to patch safely.
+    patched_env.write_text("def setup_terminal_backend(config):\n    pass\n")
+
+    outcome = sp.ensure_applied()  # must not raise
+
+    assert outcome["action"] in {"failed", "none", "needs_plugin_update"}
+
+
+def test_ensure_applied_never_raises_on_broken_input(patched_env, monkeypatch):
+    import novita_setup_patch as sp
+
+    monkeypatch.setattr(sp, "detect", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    outcome = sp.ensure_applied()
+
+    assert outcome["action"] == "error"
+
+
+def test_unpatch_clears_the_opt_in_so_nothing_auto_reapplies(patched_env):
+    from novita_setup_patch import ensure_applied
+
+    apply()
+    revert()  # clears state
+    patched_env.write_text(SYNTHETIC)
+
+    outcome = ensure_applied()
+
+    assert outcome["action"] == "none", "after unpatch, never re-apply unbidden"
+
+
+def test_ensure_applied_flags_shape_change_when_previously_applied(patched_env):
+    """Row gone AND wizard reshaped: say so, rather than passing over silently."""
+    from novita_setup_patch import ensure_applied
+
+    apply()
+    # Anchor disappeared and the file no longer has the shape we can patch.
+    patched_env.write_text("def setup_terminal_backend(config):\n    pass\n")
+
+    outcome = ensure_applied()
+
+    assert outcome["action"] == "needs_plugin_update", outcome
+    assert not is_patched(patched_env.read_text())
+
+
+def test_ensure_applied_stays_quiet_on_shape_change_without_opt_in(patched_env):
+    """Never applied here, so a reshaped wizard is not our business."""
+    from novita_setup_patch import ensure_applied
+
+    patched_env.write_text("def setup_terminal_backend(config):\n    pass\n")
+
+    outcome = ensure_applied()
+
+    assert outcome["action"] == "none"

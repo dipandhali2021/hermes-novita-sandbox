@@ -101,18 +101,37 @@ and choosing it prompts for the API key (masked), installs the SDK, sets
 `novita_template`, and adds `novita-sandbox` to `plugins.enabled` so the
 selection is not inert.
 
-### An update will revert it — and you will be told
+### An update reverts it — and the plugin puts it back automatically
 
-`hermes update` runs `git reset --hard`, which erases the edit. That is handled
-by **detection, never by silent self-repair** — the plugin does not rewrite core
-files at startup. Once you have applied the patch, it records that fact, and if
-the markers later disappear it:
+`hermes update` runs `git reset --hard`, which erases the edit. **The plugin
+re-applies it on the next Hermes start, with no command from you.**
 
-- logs one WARNING at plugin load,
-- reports `[FAIL] setup menu: patch was reverted …` from `hermes novita-sandbox doctor`.
+Auto-re-application is deliberately narrow:
 
-Re-apply with `hermes novita-sandbox patch-setup`. **The backend itself is
-unaffected** — only the menu row is missing.
+- it only ever runs if *you* applied the patch in the first place (recorded in
+  `.setup-patch.json`), so it never patches a wizard you did not ask it to touch;
+- it goes through the same guards as `patch-setup` — unique anchors, `ast`
+  validation, and a **semantic precondition check**;
+- if any guard fails it changes nothing, logs a warning, and leaves your
+  `hermes setup` working.
+
+The semantic check is what makes automatic editing of a core file defensible.
+Before writing, it parses `setup.py` and confirms `setup_terminal_backend()`
+still references the names the inserted code relies on — `terminal_choices`,
+`idx_to_backend`, `backend_to_idx`, `next_idx`, `selected_backend` — and that the
+module still provides `print_success` / `prompt_yes_no` / `save_env_value` and
+friends. So a future Hermes that **renames a local** or drops a helper is
+**refused**, rather than being injected with code that would raise `NameError`
+inside `hermes setup`.
+
+Verified against the real `setup.py`: renaming `next_idx`, dropping
+`print_warning`, or rewording the anchor all refuse and leave the file
+byte-identical.
+
+Turn it off with `terminal.novita_auto_patch_setup: false` in `config.yaml`, or
+with `hermes novita-sandbox unpatch-setup` (which also clears the opt-in).
+
+**The backend is unaffected either way** — only the menu row is ever at stake.
 
 Prefer not to touch a core file at all? Skip both `patch-setup` and
 `unpatch-setup` and use `hermes novita-sandbox setup`, which does the same job.

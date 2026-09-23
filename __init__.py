@@ -52,19 +52,22 @@ def register(ctx) -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning("novita-sandbox: CLI registration failed: %s", e, exc_info=True)
 
-    # Detect, never auto-repair: if the user applied the `hermes setup` menu
-    # patch and a Hermes update has since reverted it (git reset --hard), say so
-    # once per process. Re-adding it here would mean silently rewriting a core
-    # file at startup, which a plugin must not do.
+    # The `hermes setup` menu row is a file edit, so `hermes update` reverts it
+    # (git reset --hard). Re-apply it automatically -- but only if the user
+    # opted in by applying it once, and only through setup_patch's guards
+    # (unique anchors, semantic preconditions, AST validation). If Hermes has
+    # changed shape it reports and stops rather than writing code into a wizard
+    # it no longer understands.
     try:
         from . import setup_patch
 
-        if setup_patch.detect().get("state") == "reverted":
+        outcome = setup_patch.ensure_applied()
+        if outcome.get("action") in {"failed", "needs_plugin_update"}:
             logger.warning(
-                "novita-sandbox: the `hermes setup` menu patch was reverted "
-                "(most likely by `hermes update`). The backend still works; the "
-                "Novita row is missing from the setup menu. Re-run "
-                "`hermes novita-sandbox patch-setup` to restore it."
+                "novita-sandbox: the Novita row is missing from the `hermes setup` "
+                "menu and could not be re-added (%s). The backend still works. "
+                "See `hermes novita-sandbox doctor`.",
+                outcome.get("detail", ""),
             )
     except Exception as e:  # noqa: BLE001
         logger.debug("novita-sandbox: setup-patch check skipped: %s", e)

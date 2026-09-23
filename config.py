@@ -26,6 +26,10 @@ DEFAULTS: dict[str, Any] = {
     "container_persistent": True,
     "container_cpu": 2,
     "container_memory": 4096,
+    # Re-add the `hermes setup` menu row automatically after a Hermes update
+    # reverts it. Only ever acts if the patch was applied before, so it is opt-in
+    # by construction; set false to stop that.
+    "novita_auto_patch_setup": True,
 }
 
 TRUEISH = {"1", "true", "yes", "on"}

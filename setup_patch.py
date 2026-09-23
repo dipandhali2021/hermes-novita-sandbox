@@ -147,6 +147,90 @@ HANDLER_BLOCK = (
 
 
 # ----------------------------------------------------------------------
+# semantic preconditions
+# ----------------------------------------------------------------------
+
+# Names the inserted blocks rely on. Checked before any write so that a Hermes
+# release which renames a local (rather than moving an anchor) is refused
+# instead of being injected with code that would raise NameError *inside*
+# `hermes setup`. This is what makes automatic re-application safe.
+REQUIRED_LOCALS = (
+    "terminal_choices",
+    "idx_to_backend",
+    "backend_to_idx",
+    "next_idx",
+    "selected_backend",
+)
+REQUIRED_MODULE_NAMES = (
+    "print_success",
+    "print_info",
+    "print_warning",
+    "prompt",
+    "prompt_yes_no",
+    "get_env_value",
+    "save_env_value",
+)
+
+FUNCTION_NAME = "setup_terminal_backend"
+
+
+def semantic_precheck(text: str) -> tuple[bool, str]:
+    """Confirm setup_terminal_backend() still offers what our blocks use."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as e:
+        return False, f"setup.py does not parse: {e}"
+
+    function = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == FUNCTION_NAME
+        ),
+        None,
+    )
+    if function is None:
+        return False, f"{FUNCTION_NAME}() not found"
+
+    local_names: set[str] = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.Name):
+            local_names.add(node.id)
+        elif isinstance(node, ast.arg):
+            local_names.add(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            local_names.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            local_names.add(node.name)
+
+    missing_locals = [name for name in REQUIRED_LOCALS if name not in local_names]
+    if missing_locals:
+        return False, (
+            f"{FUNCTION_NAME}() no longer references: " + ", ".join(missing_locals)
+        )
+
+    module_names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                module_names.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            module_names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    module_names.add(target.id)
+
+    missing_module = [n for n in REQUIRED_MODULE_NAMES if n not in module_names]
+    if missing_module:
+        return False, (
+            "setup.py no longer provides at module level: " + ", ".join(missing_module)
+        )
+
+    return True, "ok"
+
+
+# ----------------------------------------------------------------------
 # state file (records that the user opted into the patch)
 # ----------------------------------------------------------------------
 
@@ -291,6 +375,14 @@ def apply() -> tuple[bool, str]:
             "Hermes' setup wizard has changed shape; the plugin needs updating."
         )
 
+    semantic_ok, semantic_detail = semantic_precheck(original)
+    if not semantic_ok:
+        return False, (
+            f"refusing to patch: {semantic_detail}. The wizard still has the "
+            "anchor lines but no longer defines what the inserted code uses, so "
+            "injecting it would break `hermes setup`. The plugin needs updating."
+        )
+
     patched = original.replace(MENU_ANCHOR, MENU_BLOCK + MENU_ANCHOR, 1)
     patched = patched.replace(HANDLER_ANCHOR, HANDLER_BLOCK + HANDLER_ANCHOR, 1)
 
@@ -382,3 +474,94 @@ def status_line() -> str:
     if state == "shape_unknown":
         return f"[FAIL] setup menu: cannot patch -- {info.get('detail')}"
     return f"[FAIL] setup menu: {state} -- {info.get('detail', '')}"
+
+
+# ----------------------------------------------------------------------
+# automatic re-application after an update
+# ----------------------------------------------------------------------
+
+
+def auto_reapply_enabled() -> bool:
+    """Whether to re-apply the menu patch automatically after an update.
+
+    Default **on** -- but it only ever acts when the state file records a prior
+    apply, so a patch the user never chose is never applied for them. Turn it
+    off with ``terminal.novita_auto_patch_setup: false`` in config.yaml, or by
+    running ``unpatch-setup``, which clears the state file.
+    """
+    try:
+        from . import config as _config
+
+        return _config.get_bool_setting("novita_auto_patch_setup", True)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def ensure_applied() -> dict:
+    """Re-apply the menu patch if an update reverted it. Never raises.
+
+    Called from the plugin's ``register()`` on every Hermes start. It does
+    nothing unless the state file shows the user previously applied the patch
+    *and* the markers are now absent -- i.e. an update ran ``git reset --hard``.
+
+    Re-application goes through the same guarded ``apply()``: anchors must be
+    unique, the wizard must still define the names the inserted code uses, and
+    the result must parse. If any of that fails it reports and stops rather than
+    writing code that could break ``hermes setup``.
+    """
+    try:
+        info = detect()
+        state = info.get("state")
+
+        if state == "patched":
+            return {"action": "none", "state": state}
+
+        if state == "shape_unknown":
+            # The row is gone and we cannot put it back. If the user had opted
+            # in, that is worth telling them about rather than passing over in
+            # silence -- otherwise the menu simply loses Novita with no signal.
+            if read_state().get("applied"):
+                logger.warning(
+                    "novita-sandbox: the Novita row is missing from `hermes setup` "
+                    "and cannot be re-added because the wizard changed shape (%s). "
+                    "The Novita backend is unaffected. Update the plugin to restore "
+                    "the row.",
+                    info.get("detail", ""),
+                )
+                return {
+                    "action": "needs_plugin_update",
+                    "state": state,
+                    "detail": info.get("detail", ""),
+                }
+            return {"action": "none", "state": state}
+
+        if state != "reverted":
+            # Never apply a patch the user did not ask for, and never touch a
+            # file whose shape cannot be verified.
+            return {"action": "none", "state": state}
+
+        if not auto_reapply_enabled():
+            return {
+                "action": "skipped",
+                "state": state,
+                "reason": "disabled by terminal.novita_auto_patch_setup",
+            }
+
+        ok, message = apply()
+        if ok:
+            logger.info(
+                "novita-sandbox: re-applied the `hermes setup` menu patch after a "
+                "Hermes update (%s)",
+                message,
+            )
+            return {"action": "applied", "state": state, "detail": message}
+
+        logger.warning(
+            "novita-sandbox: could not re-apply the `hermes setup` menu patch: %s. "
+            "The Novita backend is unaffected; run `hermes novita-sandbox doctor`.",
+            message,
+        )
+        return {"action": "failed", "state": state, "detail": message}
+    except Exception as e:  # noqa: BLE001 - must never break plugin discovery
+        logger.debug("novita-sandbox: auto re-apply check failed: %s", e)
+        return {"action": "error", "state": "unknown", "detail": str(e)}
