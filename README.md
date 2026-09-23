@@ -25,7 +25,33 @@ had. That is "degrades safely", which is the honest promise; no plugin that
 reaches into internals can promise "never breaks".
 
 Design detail and the evidence behind every behavioural claim:
-`docs/2026-09-23-novita-sandbox-backend-design.md`, section 12.
+[`docs/2026-09-23-novita-sandbox-backend-design.md`](docs/2026-09-23-novita-sandbox-backend-design.md), section 12.
+
+## Features
+
+In plain words:
+
+- **Runs your commands in the cloud instead of on your machine.** Pick `novita`
+  like you'd pick `docker` or `daytona`, and every shell command and file
+  operation Hermes makes happens inside a Novita sandbox.
+- **Your work in the sandbox is not lost.** When you're done it *pauses* rather
+  than being deleted, so your next session carries on from where you stopped.
+- **Resumes by itself.** A paused sandbox wakes up automatically the next time a
+  command needs to run — you don't do anything.
+- **Cheap by default.** A sandbox pauses after ~5 idle minutes. Paused sandboxes
+  aren't billed for CPU or memory, so idle time costs you nothing.
+- **Shows up in `hermes setup`.** One command adds Novita to the normal backend
+  menu, where it asks for your API key like the other backends do.
+- **Survives Hermes updates.** Updating Hermes wipes changes to its own code.
+  This is a plugin in `~/.hermes/plugins/`, which isn't touched — and it puts
+  itself back automatically if an update removes anything.
+- **Tells you when something breaks.** `doctor` reports what's working. If a
+  Hermes update changes something it relies on, it says so loudly instead of
+  failing in a confusing way.
+- **No cleanup chores.** One command pauses every sandbox you have (or deletes
+  them) and shows what's running.
+- **Installs nothing into Hermes' own code.** No fork, no patch file to re-apply,
+  nothing to rebase.
 
 ## Install
 
@@ -172,6 +198,88 @@ duration added by each call. The backend therefore computes
 `elapsed = now - started_at` and extends only when that lengthens the current
 deadline — a naive `set_timeout(window)` would move a deadline *backwards* on a
 long session.
+
+## Cost (read this)
+
+**A running sandbox costs money. A paused one effectively does not.**
+
+Per Novita's published pricing:
+
+| State | Billed for |
+|---|---|
+| **Running** | vCPU + RAM, **per second**. Billing stops when the sandbox stops. |
+| **Paused** | CPU and RAM billing **stops**. Only Persistent Storage is billed — **60 GB free per account**, and a synced `.hermes` tree is ~24 MB. |
+| Templates | Free. |
+
+At the `base` template's sizing (2 vCPU / 512 MiB):
+
+```
+vCPU   2 × $0.0000098/s  = $0.0000196/s
+RAM    0.5 GiB × $0.0000032/s = $0.0000016/s
+                     total ≈ $0.0000212/s
+                          ≈ $0.0013/min
+                          ≈ $0.076/hour
+                          ≈ $1.83/day   if left running
+```
+
+So the only number that matters for cost is **how long a sandbox stays
+*running* after you stop using it.** That is what `novita_timeout` controls,
+and it defaults to **300s (5 minutes)** deliberately:
+
+- a *running* sandbox is billed, a *paused* one is not;
+- sandboxes are created with `on_timeout: pause` + `auto_resume`, so a paused
+  sandbox **resumes transparently** on the next terminal command, filesystem intact.
+
+Pausing is therefore free and costs you nothing but a few seconds on the next
+command — so a long timeout buys nothing and bills you for idle time. An
+earlier default of 3600s was a mistake on my part: it left an abandoned sandbox
+running (and billing) for up to an hour.
+
+### Reclaiming on demand
+
+```bash
+hermes novita-sandbox stop --all            # pause everything (stops billing, keeps files)
+hermes novita-sandbox stop --task default   # just one task's sandbox
+hermes novita-sandbox stop --all --delete   # destroy instead (filesystem is lost)
+hermes novita-sandbox doctor --sandboxes    # see what exists, and its task id
+```
+
+`stop` connects to each sandbox and pauses it — it does not resume anything, and
+it does not touch sandboxes this plugin did not create (it selects only those
+carrying the `hermes_task_id` metadata). Sandboxes that are **already paused are
+skipped**, because `connect()` *resumes* a paused sandbox before returning — so
+touching one to "pause it again" would briefly restart its meter.
+
+### `connect()` resumes — the trap worth knowing
+
+Novita's `sandbox.connect(id)` **resumes a paused sandbox** as a side effect. So
+any tool or script that connects to a paused sandbox to *inspect* it will wake it
+and restart billing. `sandbox.list()` is safe (it does not connect); `get_info()`
+on a connected sandbox is not. If you write your own scripts against these
+sandboxes, list for state and avoid connecting unless you intend to run something.
+
+For the same reason the backend creates sandboxes with **`auto_resume: false`**.
+Auto-resume sounds convenient, but it means any stray SDK call or HTTP request
+wakes a paused sandbox and silently restarts the meter. `_ensure_ready()` resumes
+explicitly via `connect()` when Hermes actually needs a command to run, which is
+both sufficient and predictable.
+
+### Never persist at all
+
+Set `container_persistent: false` and sandboxes are **killed on teardown**
+rather than paused: no storage retention, nothing left behind — at the cost of
+losing the sandbox filesystem between sessions.
+
+### Free vs paid tier
+
+Novita's free tier allows 5 concurrent sandboxes and a **1-hour maximum session
+length** (2 vCPU / 4 GB). Topping up any balance unlocks the paid tier (100
+concurrent, 24-hour sessions, up to 8 vCPU / 8 GB) automatically. Note the
+1-hour cap: with `novita_timeout` at 300s you will pause long before it, but a
+single *command* should not be expected to run for over an hour on the free tier.
+
+Check actual spend at `novita.ai/sandbox-console/usage`, or Billing → Usage-based
+Billing → Agent Sandbox.
 
 ## Behaviour
 

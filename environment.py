@@ -153,8 +153,8 @@ class NovitaEnvironment(BaseEnvironment):
         self._template = template or cfg.get("novita_template") or "base"
         self._persistent = bool(persistent_filesystem)
         self._task_id = task_id
-        self._lifetime = _config.get_int_setting("novita_timeout", 3600)
-        self._refresh_window = _config.get_int_setting("novita_refresh_window", 3600)
+        self._lifetime = _config.get_int_setting("novita_timeout")
+        self._refresh_window = _config.get_int_setting("novita_refresh_window")
 
         # No cpu/memory parameters: the Novita API cannot set resources at
         # create time, and runtime mutation (hotplug_memory / resize) returns
@@ -234,9 +234,15 @@ class NovitaEnvironment(BaseEnvironment):
 
         # lifecycle takes a plain dict of strings: SandboxOnTimeout is not
         # importable from the public surface (spec 12.4).
+        #
+        # auto_resume is deliberately FALSE -- it is a cost trap. _ensure_ready()
+        # already resumes explicitly via connect(), so auto-resume adds nothing,
+        # while its downside is real: with auto_resume on, ANY stray SDK call or
+        # HTTP request wakes a paused sandbox and silently restarts per-second
+        # billing. Paused must mean paused until Hermes asks for it.
         lifecycle = {
             "on_timeout": "pause" if self._persistent else "kill",
-            "auto_resume": bool(self._persistent),
+            "auto_resume": False,
         }
         envs = self._forwarded_env()
         sandbox = self._client.sandbox.create(

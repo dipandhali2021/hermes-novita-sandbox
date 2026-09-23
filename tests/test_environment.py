@@ -433,7 +433,13 @@ def test_resume_uses_connect_when_metadata_matches():
     env._client.sandbox.create.assert_not_called()
 
 
-def test_create_requests_pause_and_auto_resume_when_persistent():
+def test_create_pauses_on_timeout_but_never_auto_resumes():
+    """auto_resume stays OFF on purpose -- it is a cost trap.
+
+    With auto_resume on, any stray SDK call or HTTP request wakes a paused
+    sandbox and silently restarts per-second billing. _ensure_ready() resumes
+    explicitly via connect() instead, so nothing is lost by disabling it.
+    """
     env = make_env(persistent=True)
     env._find_existing = MagicMock(return_value=None)
     env._forwarded_env = MagicMock(return_value={})
@@ -441,8 +447,21 @@ def test_create_requests_pause_and_auto_resume_when_persistent():
     env._resume_or_create()
 
     _, kwargs = env._client.sandbox.create.call_args
-    assert kwargs["lifecycle"] == {"on_timeout": "pause", "auto_resume": True}
+    assert kwargs["lifecycle"] == {"on_timeout": "pause", "auto_resume": False}
     assert kwargs["metadata"]["hermes_task_id"] == "t1"
+
+
+def test_default_lifetime_is_short_enough_not_to_bill_idle_time():
+    """Guards the mistake that shipped a 3600s default.
+
+    A running sandbox is billed per second; a paused one is not. Since we resume
+    explicitly, a long deadline buys nothing and bills for idle time -- so the
+    shipped defaults must stay short.
+    """
+    from novita_config import DEFAULTS
+
+    assert DEFAULTS["novita_timeout"] <= 600, "long deadline bills idle time"
+    assert DEFAULTS["novita_refresh_window"] <= 600
 
 
 def test_create_requests_kill_when_not_persistent():

@@ -122,7 +122,8 @@ HANDLER_BLOCK = (
                 print_warning("    No key entered - set NOVITA_API_KEY before use")
 
         config["terminal"].setdefault("novita_template", "base")
-        config["terminal"].setdefault("novita_timeout", 3600)
+        # Deliberately does NOT pin novita_timeout here: the plugin owns
+        # that default, so changing it in one place keeps working.
 
         # The backend ships as a plugin; without this the selection is inert.
         _nv_enabled = config.setdefault("plugins", {}).setdefault("enabled", [])

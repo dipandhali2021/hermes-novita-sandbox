@@ -393,8 +393,8 @@ names the exact drifted probe. "Degrades safely" — not "never breaks" — is t
 terminal:
   backend: novita
   novita_template: <built-template-id>   # or "base"
-  novita_timeout: 3600                   # sandbox lifetime, seconds (see 12.6)
-  novita_refresh_window: 3600            # keep-alive bump applied per execute
+  novita_timeout: 300                    # sandbox lifetime, seconds (see 12.6 + COST)
+  novita_refresh_window: 300             # keep-alive bump applied per execute
   container_cpu: 2                       # NOT applied at create — template-baked (12.3)
   container_memory: 4096                 # NOT applied at create — template-baked (12.3)
   container_persistent: true
@@ -405,6 +405,12 @@ terminal:
 > time, and runtime mutation (`hotplug_memory` / `resize`) returns HTTP 500. Sizing is fixed
 > by the template the sandbox boots from.
 
+> **COST.** A *running* sandbox is billed per second for vCPU + RAM; a *paused* one is
+> billed for neither (only Persistent Storage, 60 GB free per account). Because sandboxes
+> are created with `on_timeout: pause` + `auto_resume`, pausing is free and resumes
+> transparently -- so a LONG timeout buys nothing and bills for idle time. The default is
+> therefore 300s, not 3600s. `hermes novita-sandbox stop --all` reclaims on demand.
+>
 > **Note (12.6):** `novita_timeout` is a lifetime measured **from sandbox creation**, not a
 > duration added by each call. `_before_execute` computes `elapsed = now - started_at` and
 > calls `set_timeout(elapsed + novita_refresh_window)`, and only when that extends the current
@@ -457,7 +463,7 @@ them).
 **Invocation.** Verified: the Hermes venv has **no `pip`** (`No module named pip`) and **no
 `pytest` binary** in `venv/bin/`. The repo's `scripts/run_tests.sh` wrapper is not usable for
 plugin-local tests (it targets the in-tree suite and expects the repo venv to carry the dev
-dependencies). Use `uv` — verified present at `/home/dipandhali/.local/bin/uv` — with
+dependencies). Use `uv` (verified present on PATH) with
 ephemeral test dependencies so the Hermes venv is not polluted:
 
 ```bash
@@ -573,6 +579,28 @@ create time — sizing must go through `Template.build(..., cpu_count=..., memor
 **required, not optional** — but for *sizing* reasons, not toolchain reasons (see 12.5).
 Account metadata reported `resource_pools: ["free"]`, so hotplug may be a paid-tier feature;
 that is consistent with the 500s.
+
+### 12.3b COST — running bills, paused does not, and `connect()` resumes
+
+Pricing: a **running** sandbox is billed per second for vCPU + RAM (billing stops when it
+stops); a **paused** one is billed for neither, only Persistent Storage — 60 GB free per
+account, against a ~24 MB synced `.hermes` tree. At `base` sizing (2 vCPU / 512 MiB) that is
+~$0.0000212/s ≈ $0.076/hour ≈ $1.83/day **if left running**.
+
+So the only cost lever is how long a sandbox stays *running* after the last command. Two
+consequences are encoded in the implementation:
+
+1. **The lifetime default is 300s, not 3600s.** An earlier 3600s default (this spec's own
+   §8 example, and what `setup` pinned into config.yaml) billed up to an hour of idle time
+   for nothing, since pausing is free and we resume explicitly. `novita_timeout` no longer
+   appears in the inserted setup handler precisely so it cannot be pinned into a user's
+   config.yaml and then stop responding to a changed default.
+2. **`auto_resume` is `false`.** `sandbox.connect()` RESUMES a paused sandbox as a side
+   effect, so with auto-resume on, any stray SDK call or HTTP request wakes a paused sandbox
+   and silently restarts billing. `_ensure_ready()` already resumes explicitly, so
+   auto-resume adds nothing and is a cost trap. Corollary: `sandbox.list()` does NOT resume,
+   but connecting to inspect a sandbox does — `stop` therefore skips already-paused
+   sandboxes rather than waking them to pause them again.
 
 ### 12.4 CORRECTED — `lifecycle` takes a plain dict of strings
 

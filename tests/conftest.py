@@ -55,6 +55,7 @@ config = importlib.import_module(f"{_PKG_NAME}.config")
 environment = importlib.import_module(f"{_PKG_NAME}.environment")
 inject = importlib.import_module(f"{_PKG_NAME}.inject")
 setup_patch = importlib.import_module(f"{_PKG_NAME}.setup_patch")
+cli = importlib.import_module(f"{_PKG_NAME}.cli")
 
 for _alias, _module in (
     ("novita_plugin", package),
@@ -62,5 +63,6 @@ for _alias, _module in (
     ("novita_env", environment),
     ("novita_inject", inject),
     ("novita_setup_patch", setup_patch),
+    ("novita_cli", cli),
 ):
     sys.modules[_alias] = _module

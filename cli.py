@@ -460,7 +460,6 @@ def cmd_setup(args: Any) -> int:
     _say("")
     _say("[4/5] Selecting the backend")
     _set_config("terminal.backend", "novita")
-    _set_config("terminal.novita_timeout", _config.get_int_setting("novita_timeout", 3600))
     _set_config("terminal.container_persistent", "true")
     _say("  terminal.backend = novita")
     _say(f"  terminal.novita_template = {chosen}")
@@ -554,10 +553,117 @@ def cmd_unpatch_setup(args: Any) -> int:
     return 0 if ok else 1
 
 
+def cmd_stop(args: Any) -> int:
+    """Pause (default) or delete this plugin's sandboxes.
+
+    A *running* Novita sandbox is billed per second for vCPU + RAM; a *paused*
+    one is not billed for either. Since sandboxes are created with
+    ``on_timeout: pause`` + ``auto_resume``, pausing is safe: it stops the meter
+    and the next command resumes it with the filesystem intact. ``--delete``
+    destroys instead, which cannot be undone.
+    """
+    delete = bool(getattr(args, "delete", False))
+    task = getattr(args, "task", None)
+    all_of_them = bool(getattr(args, "all", False))
+
+    if not all_of_them and not task:
+        _say("Specify which sandboxes: --all, or --task <id>")
+        _say("  e.g.  hermes novita-sandbox stop --all")
+        return 1
+
+    key = _config.export_api_key()
+    if not key:
+        _say("NOVITA_API_KEY is not set. Run: hermes novita-sandbox setup")
+        return 1
+    if not _config.sdk_available():
+        _say("novita-sandbox is not installed. Run: hermes novita-sandbox setup")
+        return 1
+
+    try:
+        from novita_sandbox import Novita, SandboxQuery, SandboxState
+
+        from .environment import iter_paginator
+
+        client = Novita(api_key=key)
+        paginator = client.sandbox.list(
+            query=SandboxQuery(state=[SandboxState.RUNNING, SandboxState.PAUSED])
+        )
+        candidates = [
+            info
+            for info in iter_paginator(paginator)
+            if ((getattr(info, "metadata", None) or {}).get("hermes_task_id") or "")
+        ]
+    except Exception as e:  # noqa: BLE001
+        _say(f"Could not list sandboxes: {type(e).__name__}: {e}")
+        return 1
+
+    targets = _select_targets(candidates, task=task)
+    if not targets:
+        _say("No matching Hermes sandboxes found.")
+        return 0
+
+    verb = "Deleting" if delete else "Pausing"
+    _say("")
+    _say(f"{verb} {len(targets)} sandbox(es):")
+    failures = 0
+    for info in targets:
+        sandbox_id = info.sandbox_id
+        owner = (info.metadata or {}).get("hermes_task_id", "-")
+
+        if _already_stopped(info, delete):
+            # connect() RESUMES a paused sandbox before returning, so touching an
+            # already-paused one would wake it and restart the meter for nothing.
+            _say(f"  already paused  {sandbox_id}  task={owner}  (not charged)")
+            continue
+
+        try:
+            sandbox = client.sandbox.connect(sandbox_id)
+            if delete:
+                sandbox.kill()
+                _say(f"  deleted  {sandbox_id}  task={owner}")
+            else:
+                sandbox.pause()
+                _say(f"  paused   {sandbox_id}  task={owner}")
+        except Exception as e:  # noqa: BLE001
+            failures += 1
+            _say(f"  FAILED   {sandbox_id}: {type(e).__name__}: {e}")
+
+    _say("")
+    if delete:
+        _say("Deleted. Those filesystems are gone.")
+    else:
+        _say("Paused: CPU and RAM billing has stopped, files are kept, and the")
+        _say("next terminal command resumes the sandbox automatically.")
+    return 1 if failures else 0
+
+
+def _already_stopped(info: Any, delete: bool) -> bool:
+    """True when there is nothing to do: already paused, and we are not deleting.
+
+    Matters because ``connect()`` resumes a paused sandbox before returning, so
+    pausing an already-paused one would briefly restart its billing.
+    """
+    if delete:
+        return False
+    return "paused" in str(getattr(info, "state", "") or "").lower()
+
+
+def _select_targets(candidates: list, task: str | None = None) -> list:
+    """Pick sandboxes to stop. Shared with the tests (no API access needed)."""
+    if task is None:
+        return list(candidates)
+    return [
+        info
+        for info in candidates
+        if ((getattr(info, "metadata", None) or {}).get("hermes_task_id")) == task
+    ]
+
+
 _COMMANDS = {
     "setup": cmd_setup,
     "doctor": cmd_doctor,
     "install-template": cmd_install_template,
+    "stop": cmd_stop,
     "patch-setup": cmd_patch_setup,
     "unpatch-setup": cmd_unpatch_setup,
 }
@@ -586,6 +692,17 @@ def _setup_parser(parser: Any) -> None:
     install.add_argument("--image", default=DEFAULT_IMAGE)
     install.add_argument("--cpu", type=int, default=2)
     install.add_argument("--memory", type=int, default=4096)
+
+    stop = subparsers.add_parser(
+        "stop",
+        help="Pause (or delete) this plugin's sandboxes to stop billing",
+    )
+    stop.add_argument("--all", action="store_true", help="Every Hermes-created sandbox")
+    stop.add_argument("--task", default=None, help="Only this task id")
+    stop.add_argument(
+        "--delete", action="store_true",
+        help="Destroy instead of pausing (filesystem is lost)",
+    )
 
     subparsers.add_parser(
         "patch-setup",

@@ -18,11 +18,17 @@ logger = logging.getLogger(__name__)
 # Defaults mirror Hermes' own terminal defaults where they overlap.
 DEFAULTS: dict[str, Any] = {
     "novita_template": "base",
-    # Sandbox lifetime in seconds. Note: this is measured from sandbox CREATION,
-    # not from each call -- see the design spec section 12.6.
-    "novita_timeout": 3600,
-    # How far ahead of "now" the keep-alive bump aims, per execute.
-    "novita_refresh_window": 3600,
+    # Sandbox lifetime in seconds, measured from sandbox CREATION (spec 12.6).
+    #
+    # Keep this SHORT. A running sandbox is billed per second for vCPU + RAM,
+    # while a paused one is not billed for either -- and because we create
+    # sandboxes with `on_timeout: pause` + `auto_resume`, a paused sandbox
+    # resumes transparently on the next command. So a long deadline costs money
+    # and buys nothing. 300s means an abandoned sandbox stops billing ~5 minutes
+    # after the last command instead of running for an hour.
+    "novita_timeout": 300,
+    # How far past the last command the keep-alive aims. Same reasoning.
+    "novita_refresh_window": 300,
     "container_persistent": True,
     "container_cpu": 2,
     "container_memory": 4096,
@@ -162,8 +168,8 @@ def describe() -> dict[str, Any]:
     """Non-secret config summary, for ``hermes novita-sandbox doctor``."""
     return {
         "novita_template": get_setting("novita_template"),
-        "novita_timeout": get_int_setting("novita_timeout", 3600),
-        "novita_refresh_window": get_int_setting("novita_refresh_window", 3600),
+        "novita_timeout": get_int_setting("novita_timeout"),
+        "novita_refresh_window": get_int_setting("novita_refresh_window"),
         "container_persistent": get_bool_setting("container_persistent", True),
         "container_cpu": get_int_setting("container_cpu", 2),
         "container_memory": get_int_setting("container_memory", 4096),
