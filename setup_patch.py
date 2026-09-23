@@ -302,8 +302,10 @@ def apply() -> tuple[bool, str]:
 
     backup = path.with_suffix(path.suffix + BACKUP_SUFFIX)
     try:
-        if not backup.exists():
-            shutil.copy2(path, backup)
+        # Always refresh, so the backup records the content we actually patched
+        # from. A stale one would be misleading after an update reverted the
+        # file. (Repeat applies return early above, so this cannot clobber.)
+        shutil.copy2(path, backup)
         path.write_text(patched)
     except Exception as e:  # noqa: BLE001
         return False, f"cannot write {path}: {e}"
