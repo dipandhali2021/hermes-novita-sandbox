@@ -1,0 +1,162 @@
+# novita-sandbox
+
+Adds **Novita Agent Sandbox** as a terminal backend for Hermes, alongside
+`local`, `docker`, `singularity`, `modal`, `daytona`, and `ssh`. With
+`terminal.backend: novita`, Hermes' `terminal`, `read_file`, `write_file`,
+`patch`, `search_files`, and `execute_code` all run inside a Novita sandbox.
+
+## Why it is shaped like this
+
+This plugin **modifies no Hermes source file**, on purpose.
+
+The target install is a shallow, detached snapshot of `NousResearch/hermes-agent`,
+and `hermes update` runs `git fetch --depth 1` → **`git reset --hard`** →
+`uv pip install -e .`. Any edit to a tracked core file is therefore *silently
+reverted* on the next update (and `git clean -fd` removes untracked files inside
+the tree as well). Shipping a backend the way Daytona ships one would mean ~40
+edit sites across ~25 files — all of which an update erases.
+
+So the plugin lives entirely in `~/.hermes/plugins/`, outside the git worktree,
+where `git reset --hard` cannot reach it, and routes `backend: novita` at
+runtime. If a future Hermes renames or removes an internal it depends on, one
+probe fails, the backend disables itself with a clear log line, and **Hermes
+keeps working** — worst case your terminal falls back to the backend you already
+had. That is "degrades safely", which is the honest promise; no plugin that
+reaches into internals can promise "never breaks".
+
+Design detail and the evidence behind every behavioural claim:
+`docs/2026-09-23-novita-sandbox-backend-design.md`, section 12.
+
+## Install
+
+```bash
+# 1. the SDK
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python 'novita-sandbox>=2.1.0,<3'
+
+# 2. enable the plugin (user plugins are opt-in)
+hermes plugins enable novita-sandbox
+
+# 3. configure it interactively, then activate
+hermes novita-sandbox setup
+```
+
+`setup` walks through: SDK presence → API key (masked prompt, validated against
+the live API with a throwaway sandbox) → template choice → backend selection →
+an end-to-end verification through `NovitaEnvironment`.
+
+Non-interactive:
+
+```bash
+hermes novita-sandbox setup --api-key sk_... --yes
+```
+
+## Usage
+
+```bash
+hermes novita-sandbox doctor             # probe report + config + checks
+hermes novita-sandbox doctor --live      # also create a real sandbox
+hermes novita-sandbox status             # sandboxes on your account
+hermes novita-sandbox install-template   # build a custom cpu/memory template
+
+# activate / revert
+hermes config set terminal.backend novita
+hermes config set terminal.backend local
+```
+
+## Configuration (`~/.hermes/config.yaml`)
+
+```yaml
+terminal:
+  backend: novita
+  novita_template: base        # or a template id from install-template
+  novita_timeout: 3600         # sandbox lifetime in seconds, from creation
+  novita_refresh_window: 3600  # keep-alive target, bumped per execute
+  container_persistent: true   # pause on teardown instead of kill
+```
+
+The secret `NOVITA_API_KEY` belongs in `~/.hermes/.env` (Hermes' secrets-only
+file), never in `config.yaml`.
+
+### Sizing is template-baked
+
+Novita's SDK cannot set cpu/memory at sandbox-create time, and runtime mutation
+(`hotplug_memory`, `resize`) returns HTTP 500 — verified live. The `base`
+template gives 2 vCPU / 512 MB, which is modest for agent work. To get more,
+build a template once:
+
+```bash
+hermes novita-sandbox install-template --cpu 2 --memory 4096
+```
+
+`base` already ships python3.11, node20, git, bash and tar, so a custom template
+is only needed for sizing.
+
+### Lifetime
+
+`novita_timeout` is a lifetime measured **from sandbox creation**, not a
+duration added by each call. The backend therefore computes
+`elapsed = now - started_at` and extends only when that lengthens the current
+deadline — a naive `set_timeout(window)` would move a deadline *backwards* on a
+long session.
+
+## Behaviour
+
+- **Persistence.** With `container_persistent: true`, sandboxes are created with
+  `on_timeout: pause` + `auto_resume`, tagged `hermes_task_id`, and resumed by
+  task on the next session. Teardown pauses and syncs files back to your host; it
+  does not kill. Set it to `false` to kill on teardown instead.
+- **Interrupts pause, not kill.** Ctrl-C during a command pauses the sandbox so
+  the filesystem survives; the next command resumes it.
+- **File sync.** Your skills tree, skill scripts, cache, and opt-in credential
+  files are uploaded to the sandbox (batched, ~550 files / ~22 MB for a typical
+  home), and remote edits are pulled back on teardown. Credential files are
+  opt-in via Hermes' own config — the plugin adds no new file exposure.
+- **A dropped connection is retried once** after a reconnect rather than failing
+  your command.
+
+## Known differences from a core backend
+
+Both are consequences of not editing core, and both are safe:
+
+1. **Commands still go through Hermes' approval prompts.** Core's
+   sandboxed-backend approval bypass uses inline literals the plugin cannot
+   reach. More friction, not less safety.
+2. **Per-task resource overrides do not apply.** Global `terminal.*` config is
+   read instead.
+
+Also cosmetic: `hermes setup`'s backend menu, `hermes doctor`, `hermes status`
+and the dashboard dropdown do not list `novita`. Use
+`hermes novita-sandbox doctor` for the diagnostics those would provide.
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `terminal` says the tool is unavailable | `hermes novita-sandbox doctor` — a pivotal probe failed, or `NOVITA_API_KEY` is unset |
+| `NOVITA_API_KEY is not set` | run `hermes novita-sandbox setup` |
+| `novita-sandbox is not installed` | see Install step 1 |
+| terminal calls blocked with a "backend unavailable" message | a Hermes update changed an internal; `doctor` names the drifted probe |
+| Commands run locally instead of in Novita | `terminal.backend` is not `novita` |
+| `Unknown TERMINAL_ENV: novita` | the plugin is not enabled: `hermes plugins enable novita-sandbox`, then restart |
+
+## Layout
+
+| File | Role |
+|---|---|
+| `environment.py` | `NovitaEnvironment(BaseEnvironment)` — no Hermes internals, no patching |
+| `inject.py` | runtime routing: 7 capability-probed patches + unavailability guard |
+| `config.py` | `terminal.*` + `NOVITA_API_KEY` resolution |
+| `cli.py` | `hermes novita-sandbox setup\|doctor\|status\|install-template` |
+| `probes/` | the live API probes that established the SDK's real behaviour |
+| `tests/` | 65 offline tests; the inject suite simulates internals changing |
+
+## Tests
+
+```bash
+uv run --no-project --python ~/.hermes/hermes-agent/venv/bin/python \
+       --with pytest pytest tests/ -q
+```
+
+`tests/test_inject.py` is the important one: it drives the probes against
+synthetic modules whose internals have been renamed, removed, or retyped, and
+asserts that `install()` never raises and never half-wires the backend.
