@@ -278,17 +278,19 @@ upload_fn=..., delete_fn=..., bulk_upload_fn=..., bulk_download_fn=...)` exactly
 |---|---|
 | `upload(host, remote)` | `mkdir -p <parent>` via `commands.run`, then `files.write(remote, open(host, "rb"))` |
 | `bulk_upload(files)` | `mkdir -p` all `unique_parent_dirs(files)`, then `files.write_files([{"path": remote, "data": <bytes>}, ...])` |
-| `bulk_download(dest)` | `commands.run("tar cf /tmp/.hermes_sync.<pid>.tar -C / <rel>")` → read bytes → write to `dest` → `commands.run("rm -f …")` |
+| `bulk_download(dest)` | `commands.run("tar cf /tmp/.hermes_sync.<pid>.tar -C / <rel>")` → **`download_url(path)`** → `httpx.get(url).content` (bytes) → write to `dest` → `commands.run("rm -f …")` |
 | `delete(paths)` | `commands.run(quoted_rm_command(paths))` |
 
 PID-suffixed remote temp path mirrors `daytona.py:187` so concurrent `sync_back` calls for
 the same sandbox cannot collide.
 
-**Open item:** the exact binary-read call for `bulk_download` (`files.read(path)` return type,
-and whether a bytes format flag is required) is unconfirmed from the docs and must be
-determined by the live probe (Section 12). If no binary read exists, fall back to
-`files.read(path, format="bytes")` (E2B convention) and, failing that, to a pre-signed
-download URL.
+> **CORRECTED BY LIVE PROBE.** The original design read the tar back with `files.read(path)`.
+> The probe proved `files.read()` returns **`str`**, not bytes — a tar fetched that way comes
+> back decoded and is **not binary-safe**. The verified working path is
+> `sandbox.download_url(path)` → HTTP GET, which the probe confirmed returns `200`,
+> `10240` bytes, with the `ustar` magic intact at offset 257.
+> Signature: `download_url(self, path, user=None, use_signature_expiration=None) -> str`.
+> **`files.read` must never be used for binary payloads.**
 
 ### 5.4 Lifecycle
 
@@ -391,11 +393,22 @@ names the exact drifted probe. "Degrades safely" — not "never breaks" — is t
 terminal:
   backend: novita
   novita_template: <built-template-id>   # or "base"
-  novita_timeout: 3600                   # sandbox TTL, seconds; refreshed on activity
-  container_cpu: 2
-  container_memory: 4096
+  novita_timeout: 3600                   # sandbox lifetime, seconds (see 12.6)
+  novita_refresh_window: 3600            # keep-alive bump applied per execute
+  container_cpu: 2                       # NOT applied at create — template-baked (12.3)
+  container_memory: 4096                 # NOT applied at create — template-baked (12.3)
   container_persistent: true
 ```
+
+> **Note (12.3):** `container_cpu` / `container_memory` are read for **reporting and for the
+> `install-template` build step only**. The Novita SDK cannot apply them at sandbox-create
+> time, and runtime mutation (`hotplug_memory` / `resize`) returns HTTP 500. Sizing is fixed
+> by the template the sandbox boots from.
+
+> **Note (12.6):** `novita_timeout` is a lifetime measured **from sandbox creation**, not a
+> duration added by each call. `_before_execute` computes `elapsed = now - started_at` and
+> calls `set_timeout(elapsed + novita_refresh_window)`, and only when that extends the current
+> `end_at` — otherwise a long-running session could have its deadline *shortened*.
 
 `config.py` resolves these itself — preferring `hermes_cli.config.load_config()` when
 importable, falling back to reading `get_hermes_home() / "config.yaml"` directly — with
@@ -504,44 +517,160 @@ covers the file tools and code-execution paths, not just `terminal`.
 
 ---
 
-## 12. Open items to resolve during implementation
+## 12. Open items — RESOLVED against the live API (2026-09-23)
 
-These are deliberately left open rather than guessed; each is cheap to settle with a live
-probe against the real API, and none changes the architecture.
+All items below were **settled by live probe**, not left to inference. Probes are committed
+at `probes/probe_api.py`, `probes/probe_persistence.py`, `probes/probe_auth_resume.py`.
+Installed SDK: `novita-sandbox==2.1.1` (its `__version__` attribute reports a stale `1.0.0`;
+trust the distribution version).
 
-1. **Binary read for `bulk_download`** — exact call and return type for reading a tar's bytes
-   (`files.read(path)` vs a bytes format flag). Fallback: pre-signed download URL.
-2. **`novita.sandbox.list` pagination + metadata filter** — confirm `SandboxQuery.state`
-   accepts both `RUNNING` and `PAUSED` in one query, and that `.next_items()` behaves as
-   documented on v2.1.1.
-3. **`set_timeout` semantics** — confirm the unit (seconds vs ms) matches `create(timeout=...)`,
-   since the docs show `timeout=3600` for create and `timeoutMs` for JS.
-4. **Resume latency** — measure `connect()` on a paused sandbox; if it is slow, consider
-   raising `novita_timeout` and lowering resume frequency instead of refreshing every
-   `_before_execute`.
-5. **`files.write` with a file object vs bytes** — the docs show a file object; confirm bytes
-   work for `write_files`.
-6. **Interrupt refinement** — whether `background=True` + `handle.kill()` is worth adopting
-   over pause-on-interrupt (Section 5.2).
-7. **`stdin_data` under heredoc mode** — confirm base.py never routes it to a real pipe.
-8. **`novita-sandbox` installation mechanics** — *partly resolved.* Verified: the venv at
-   `~/.hermes/hermes-agent/venv` has **no `pip`** (`No module named pip`), and `uv` is
-   present at `/home/dipandhali/.local/bin/uv`. `hermes_cli/managed_uv.py` exposes
-   `resolve_uv()` / `ensure_uv()` as the sanctioned resolver. The working command is
-   therefore `uv pip install --python ~/.hermes/hermes-agent/venv/bin/python novita-sandbox`
-   — installing into the Hermes venv, which is the established pattern (`lazy_deps` installs
-   `daytona`/`modal` the same way). **Remaining question:** confirm `managed_uv.resolve_uv()`
-   is importable from plugin context, and whether patch 7 (`LAZY_DEPS` registration) makes
-   the install path automatic so the plugin never shells out itself. Verify the pin matches
-   the `AGENTS.md` dependency policy: `>=2.1.0,<3` (post-1.0 → `>=floor,<next_major`).
-9. **Parity template.** `hermes novita-sandbox install-template` builds
-   `Template().from_image("nikolaik/python-nodejs:python3.11-nodejs20")` as
-   `Template.build(t, "hermes-novita", cpu_count=2, memory_mb=4096)`. Confirm the image is
-   accepted by Novita's builder (it may require a registry-reachable image, and build time /
-   quota are unverified).
+**Three original design assumptions were wrong and are corrected here.**
 
----
+### 12.1 Confirmed as designed
 
+**`CommandExitException` is real and carries the result fields.** Found at
+`novita_sandbox.CommandExitException`. Its MRO is
+`CommandExitException → SandboxException → Exception → BaseException`, **and also
+`CommandResult`** — so it inherits `stdout`, `stderr`, `exit_code`, `error` directly.
+Verified: `commands.run("echo before; exit 42")` raised with `.exit_code == 42`,
+`.stdout == 'before\n'`, `.error == 'exit status 42'`. The §5.2 `except` unwrap is
+**mandatory and correct**; it is the first thing the test suite must cover.
+
+**Success shape.** `commands.run` returns a `CommandResult` with `.stdout`, `.stderr`,
+`.exit_code == 0`, `.error == ''`.
+
+**Pause/resume works.** `pause()` → `get_info().state == SandboxState.PAUSED`. This is the
+persistence mechanism.
+
+**`SandboxState`** is a str-subclass with `RUNNING` and `PAUSED`.
+
+### 12.2 CORRECTED — binary download must not use `files.read`
+
+`files.read()` returns **`str`**, not bytes. A tar fetched that way comes back decoded and is
+**not binary-safe**. Verified working alternative: `sandbox.download_url(path)` → HTTP GET
+returned `200`, `10240` bytes, `ustar` magic intact at offset 257.
+Signature: `download_url(self, path, user=None, use_signature_expiration=None) -> str`.
+`bulk_download` therefore uses `download_url` + `httpx` (see §5.3). `files.read` must never
+touch a binary payload.
+
+### 12.3 CORRECTED — resources are template-baked, not settable at create
+
+The SDK's `Sandbox.create` signature has **no** `cpu_count` / `memory_mb` parameter. It
+accepts `template`, `image`, `build`, `timeout`, `metadata`, `envs`, `secure`,
+`allow_internet_access`, `auto_pause`, `mcp`, `network`, `secret_envs`, `lifecycle`,
+`volume_mounts`, `node_id`.
+
+Runtime mutation was attempted and **failed**:
+- `hotplug_memory(4096)` → `SandboxException: 500: Error hotplugging memory on sandbox`
+- `resize(memory_mib=4096)` → same `500`
+
+The `base` template yields `cpu_count=2, memory_mb=512`.
+
+**Consequence:** `terminal.container_cpu` / `container_memory` **cannot** be applied at
+create time — sizing must go through `Template.build(..., cpu_count=..., memory_mb=...)`.
+512 MB is low for agent work (installs, builds), so the parity template build is
+**required, not optional** — but for *sizing* reasons, not toolchain reasons (see 12.5).
+Account metadata reported `resource_pools: ["free"]`, so hotplug may be a paid-tier feature;
+that is consistent with the 500s.
+
+### 12.4 CORRECTED — `lifecycle` takes a plain dict of strings
+
+`create(..., lifecycle={"on_timeout": "pause", "auto_resume": True})` works and is confirmed
+by readback: `get_info().lifecycle == {'on_timeout': SandboxOnTimeout.PAUSE, 'auto_resume': True}`.
+`SandboxOnTimeout` is **not** importable from `novita_sandbox` nor from
+`novita_sandbox.core.sandbox.sandbox_api` — pass the strings `"pause"` / `"kill"`.
+
+Default lifecycle is `{'on_timeout': KILL, 'auto_resume': False}` with a 5-minute default
+lifetime, so persistence must be requested explicitly.
+
+### 12.5 `base` toolchain is already sufficient
+
+`$HOME=/root`, `whoami=root`, `pwd=/root`, Linux 6.1.158+, bash 5.2.15,
+**python3 3.11.6, node v20.9.0, git 2.39.5, tar 1.34, sha1sum/sha256sum present**.
+
+This is materially close to `nikolaik/python-nodejs:python3.11-nodejs20`. The custom template
+is therefore needed **only to raise cpu/memory** above the `base` 2 vCPU / 512 MB.
+
+`template.list(template_type="template_build")` returned `total=0` — nothing has been built
+on this account, and `base` is a system template. **Whether this account may build templates
+(free tier) remains the one unverified item;** the first build attempt settles it.
+
+### 12.6 `set_timeout` is seconds, measured from CREATION (not from the call)
+
+Verified arithmetic: `create(timeout=300)` → `end_at = created + 300`.
+Then `set_timeout(600)` moved `end_at` to `created + 600`, i.e. the observed delta was
+**+303 s, not +600 s**.
+
+**Implementation consequence:** a naive `set_timeout(window)` on each execute can *shrink* an
+existing deadline. To keep an active session alive, compute
+`elapsed = now - info.started_at` and call `set_timeout(elapsed + window)`, and only ever
+call it when the resulting deadline is longer than the current `end_at`.
+
+### 12.7 Class-level SDK calls lose auth unless the key is exported
+
+With the key passed only to the `Novita(...)` client, bare classmethods raised
+`AuthenticationException: API key is required…`:
+
+```python
+Sandbox.list(query=...)        # AuthenticationException
+```
+
+Setting `os.environ["NOVITA_API_KEY"]` before the call fixed it. **This would have been a
+silent production failure** — the environment-resolution path (§5.1 step 5, §8) must export
+`NOVITA_API_KEY` into the process environment before any class-level SDK call, in addition to
+constructing the client.
+
+### 12.8 The paginator raises on exhaustion
+
+`pag.next_items()` raises `Exception("No more items to fetch")` rather than returning `[]`,
+so the obvious loop **does not terminate normally**:
+
+```python
+while True:
+    items = pag.next_items()   # raises once the pages run out
+    if not items:
+        break
+```
+
+Use `has_next`, or catch that exception explicitly.
+
+### 12.9 Metadata filtering is unreliable — filter client-side
+
+`SandboxQuery(state=[PAUSED], metadata={"hermes_probe3": "1"})` returned **zero** results,
+while a state-only query, run moments later, found the very same sandbox whose
+`metadata` readback contained exactly that key/value pair.
+
+**Consequence:** `resume-or-create` lists by **state only**, then matches
+`metadata.get("hermes_task_id")` in Python. Do not depend on server-side metadata filtering.
+
+### 12.10 Verified sandbox surface (useful beyond the above)
+
+- `sandbox.commands`: `run`, `kill`, `list`, `connect`, `send_stdin`
+- `sandbox.files`: `read`, `write`, `write_files`, `list`, `**make_dir**`, `remove`, `rename`,
+  `exists`, `get_info`, `watch_dir`
+- `sandbox`: `pause`, `beta_pause`, `set_timeout`, `connect`, `kill`, `get_info`,
+  `**download_url**`, `**upload_url**`, `git`, `reset`, `resize`, `hotplug_memory`,
+  `create_snapshot`, `list_snapshots`, `get_quota`, `get_metrics`, `get_events`,
+  `set_network`, `mount_volume`, **`pty`**, `is_running`, `default_template`,
+  `default_sandbox_timeout`
+
+Two consequences worth carrying into implementation:
+
+1. **`files.make_dir` exists** — prefer it over shelling out to `mkdir -p` for upload parents
+   (§5.3), removing a round-trip and a quoting hazard.
+2. **`sandbox.pty` and `commands.send_stdin` exist** — real interactive stdin is available
+   even though `_stdin_mode = "heredoc"` is retained for base-class compatibility. This is
+   the escape hatch if heredoc folding ever proves lossy for a command.
+
+### 12.11 Still genuinely open (cheap to settle later, none architectural)
+
+1. **Template build acceptance + quota on this account** (12.5) — settled by the first
+   `hermes novita-sandbox install-template` run.
+2. **Resume latency** — not yet measured; determines whether bumping `novita_timeout` beats
+   refreshing per-execute (§5.4).
+3. **`files.make_dir` on nested paths** — verify it creates parents like `mkdir -p`.
+4. **`use_signature_expiration` for `download_url`** — the default presigned-URL TTL is
+   unknown; set it explicitly for the bulk-download path.
 ## 13. File manifest
 
 | File | Purpose | ~Lines |
