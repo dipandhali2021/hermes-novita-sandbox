@@ -168,15 +168,6 @@ def _install_sdk() -> bool:
     return True
 
 
-def _sdk_importable() -> bool:
-    try:
-        import novita_sandbox  # noqa: F401
-
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
 # ----------------------------------------------------------------------
 # Live validation
 # ----------------------------------------------------------------------
@@ -260,7 +251,7 @@ def cmd_doctor(args: Any = None) -> int:
     _say("")
     _say("Checks")
     _say(f"  {_health_icon(True)} plugin loaded")
-    _say(f"  {_health_icon(_sdk_importable())} novita-sandbox importable")
+    _say(f"  {_health_icon(_config.sdk_available())} novita-sandbox importable")
     key_present = bool(_config.get_api_key())
     _say(f"  {_health_icon(key_present)} NOVITA_API_KEY set")
     _say(f"  {_health_icon(bool(_find_uv()))} uv available (for installs)")
@@ -280,7 +271,7 @@ def cmd_doctor(args: Any = None) -> int:
         _say("keep working; set terminal.backend to another value to silence the guard.")
         return 1
 
-    if key_present and _sdk_importable() and getattr(args, "live", False):
+    if key_present and _config.sdk_available() and getattr(args, "live", False):
         _say("")
         _say("Live check")
         ok, detail = _validate_key(_config.get_api_key() or "")
@@ -293,33 +284,33 @@ def cmd_doctor(args: Any = None) -> int:
         _say("Non-fatal degradations (backend still works):")
         for patch in report.degradations():
             _say(f"  - {patch.name}: {patch.detail or patch.status}")
+
+    if getattr(args, "sandboxes", False):
+        _print_sandboxes()
+
     _say("")
     _say("Run with --live to create a real sandbox and verify end to end.")
     return 0
 
 
-def cmd_status(args: Any = None) -> int:
-    _say("")
-    _say("Novita sandbox backend -- status")
-    _say("=" * 60)
-    for key, value in _config.describe().items():
-        _say(f"  {key}: {value}")
-
+def _print_sandboxes() -> int:
+    """List the sandboxes on this account. Used by `doctor --sandboxes`."""
     key = _config.export_api_key()
     if not key:
-        _say("\nNo API key; nothing further to report. Run: hermes novita-sandbox setup")
+        _say("  No API key; nothing to list. Run: hermes novita-sandbox setup")
         return 0
 
-    _say("\nSandboxes on this account:")
+    _say("")
+    _say("Sandboxes on this account:")
     try:
         from novita_sandbox import Novita, SandboxQuery, SandboxState
+
+        from .environment import iter_paginator
 
         client = Novita(api_key=key)
         paginator = client.sandbox.list(
             query=SandboxQuery(state=[SandboxState.RUNNING, SandboxState.PAUSED])
         )
-        from .environment import iter_paginator
-
         count = 0
         for info in iter_paginator(paginator):
             metadata = getattr(info, "metadata", None) or {}
@@ -328,6 +319,8 @@ def cmd_status(args: Any = None) -> int:
             count += 1
         if count == 0:
             _say("  (none)")
+        else:
+            _say("  (paused sandboxes persist across sessions and may count against quota)")
     except Exception as e:  # noqa: BLE001
         _say(f"  FAILED: {type(e).__name__}: {e}")
         return 1
@@ -343,7 +336,7 @@ def cmd_install_template(args: Any) -> int:
     if not _config.export_api_key():
         _say("NOVITA_API_KEY is not set. Run: hermes novita-sandbox setup")
         return 1
-    if not _sdk_importable():
+    if not _config.sdk_available():
         _say("novita-sandbox is not installed. Run: hermes novita-sandbox setup")
         return 1
 
@@ -387,7 +380,7 @@ def cmd_setup(args: Any) -> int:
 
     # 1. SDK -----------------------------------------------------------
     _say("[1/5] Novita SDK")
-    if _sdk_importable():
+    if _config.sdk_available():
         _say(f"  {_health_icon(True)} already installed")
     else:
         _say(f"  {_health_icon(False)} not installed")
@@ -469,7 +462,7 @@ def cmd_setup(args: Any) -> int:
     _set_config("terminal.backend", "novita")
     _set_config("terminal.novita_timeout", _config.get_int_setting("novita_timeout", 3600))
     _set_config("terminal.container_persistent", "true")
-    _say(f"  terminal.backend = novita")
+    _say("  terminal.backend = novita")
     _say(f"  terminal.novita_template = {chosen}")
     _say("  terminal.container_persistent = true")
 
@@ -564,7 +557,6 @@ def cmd_unpatch_setup(args: Any) -> int:
 _COMMANDS = {
     "setup": cmd_setup,
     "doctor": cmd_doctor,
-    "status": cmd_status,
     "install-template": cmd_install_template,
     "patch-setup": cmd_patch_setup,
     "unpatch-setup": cmd_unpatch_setup,
@@ -584,8 +576,10 @@ def _setup_parser(parser: Any) -> None:
 
     doctor = subparsers.add_parser("doctor", help="Report patch probes and configuration")
     doctor.add_argument("--live", action="store_true", help="Also create a real sandbox")
+    doctor.add_argument(
+        "--sandboxes", action="store_true", help="Also list sandboxes on the account"
+    )
 
-    subparsers.add_parser("status", help="Show configuration and sandboxes on the account")
 
     install = subparsers.add_parser("install-template", help="Build a custom sandbox template")
     install.add_argument("--name", default=DEFAULT_TEMPLATE_NAME)

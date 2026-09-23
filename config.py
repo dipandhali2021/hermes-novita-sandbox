@@ -46,6 +46,21 @@ def hermes_home() -> Path:
         return Path(env) if env else Path.home() / ".hermes"
 
 
+def sdk_available() -> bool:
+    """Whether novita_sandbox is importable.
+
+    Uses ``find_spec`` rather than importing, so a presence check has no import
+    side effects and no unused-import noise. Single source of truth: the
+    environment, the CLI, and the injector all ask this.
+    """
+    try:
+        import importlib.util
+
+        return importlib.util.find_spec("novita_sandbox") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _read_yaml_terminal() -> dict[str, Any]:
     """Fallback: read the ``terminal:`` section of config.yaml directly."""
     cfg_path = hermes_home() / "config.yaml"

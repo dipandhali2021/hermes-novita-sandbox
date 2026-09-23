@@ -12,12 +12,9 @@ import sys
 import types
 from unittest.mock import MagicMock
 
-import pytest
-
 from novita_inject import (
     BACKEND,
     InjectionReport,
-    PatchResult,
     _add_to_name_set,
     _patch_check_fn,
     _patch_descriptions,

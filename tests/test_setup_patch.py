@@ -226,23 +226,22 @@ def test_apply_refuses_when_shape_changed(tmp_path, monkeypatch):
     assert target.read_text() == original, "a refused patch must not touch the file"
 
 
-def test_apply_never_writes_unparseable_code(patched_env, monkeypatch):
-    """If the anchors sit somewhere that would break syntax, refuse."""
-    import novita_setup_patch as sp
+def test_apply_never_writes_unparseable_code(patched_env):
+    """Dedented anchors must be refused, not injected.
 
-    # Anchor present exactly once, but at top level (0 indent) would break the
-    # insertion; emulate by making the anchor dedented.
+    The assertion is strict: the earlier "either it refused or it parses"
+    version could pass while writing code at the wrong indentation.
+    """
     broken = SYNTHETIC.replace(MENU_ANCHOR, MENU_ANCHOR.lstrip()).replace(
         HANDLER_ANCHOR, HANDLER_ANCHOR.lstrip()
     )
     patched_env.write_text(broken)
+
     ok, message = apply()
 
-    # Either it refused, or it produced something that parses.
-    if ok:
-        ast.parse(patched_env.read_text())
-    else:
-        assert "refusing" in message or "parse" in message
+    assert not ok
+    assert "refusing" in message
+    assert patched_env.read_text() == broken, "a refused patch must not touch the file"
 
 
 def test_apply_survives_unwritable_target(patched_env, monkeypatch):

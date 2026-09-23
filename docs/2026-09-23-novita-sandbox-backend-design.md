@@ -520,7 +520,8 @@ covers the file tools and code-execution paths, not just `terminal`.
 ## 12. Open items — RESOLVED against the live API (2026-09-23)
 
 All items below were **settled by live probe**, not left to inference. Probes are committed
-at `probes/probe_api.py`, `probes/probe_persistence.py`, `probes/probe_auth_resume.py`.
+at `probes/integration_check.py` (plus the one-shot API probes that produced the
+findings below, removed once their results were encoded in code and here).
 Installed SDK: `novita-sandbox==2.1.1` (its `__version__` attribute reports a stale `1.0.0`;
 trust the distribution version).
 

@@ -50,17 +50,6 @@ BACKUP_SUFFIX = ".novita-orig"
 PLUGIN_KEY = "novita-sandbox"
 
 
-def hermes_home() -> Path:
-    try:
-        from hermes_constants import get_hermes_home  # type: ignore
-
-        return Path(get_hermes_home())
-    except Exception:  # noqa: BLE001
-        import os
-
-        return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
-
-
 PLUGIN_DIR = Path(__file__).resolve().parent
 
 

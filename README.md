@@ -54,8 +54,8 @@ hermes novita-sandbox setup --api-key sk_... --yes
 
 ```bash
 hermes novita-sandbox doctor             # probe report + config + checks
+hermes novita-sandbox doctor --sandboxes # ...and the sandboxes on your account
 hermes novita-sandbox doctor --live      # also create a real sandbox
-hermes novita-sandbox status             # sandboxes on your account
 hermes novita-sandbox install-template   # build a custom cpu/memory template
 
 # add Novita to `hermes setup`'s terminal backend menu (see below)
@@ -220,8 +220,8 @@ and the dashboard dropdown do not list `novita`. Use
 | `environment.py` | `NovitaEnvironment(BaseEnvironment)` — no Hermes internals, no patching |
 | `inject.py` | runtime routing: 7 capability-probed patches + unavailability guard |
 | `config.py` | `terminal.*` + `NOVITA_API_KEY` resolution |
-| `cli.py` | `hermes novita-sandbox setup\|doctor\|status\|install-template` |
-| `probes/` | the live API probes that established the SDK's real behaviour |
+| `cli.py` | `hermes novita-sandbox setup\|doctor\|install-template\|patch-setup\|unpatch-setup` |
+| `probes/integration_check.py` | live end-to-end check (creates a real sandbox) |
 | `tests/` | 65 offline tests; the inject suite simulates internals changing |
 
 ## Tests

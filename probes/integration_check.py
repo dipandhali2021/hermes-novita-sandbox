@@ -1,11 +1,19 @@
-"""Load the plugin through Hermes' real plugin manager and show the report.
+"""Live integration check: load the plugin through Hermes' real plugin
+manager and prove `backend: novita` actually routes.
+
+This is the end-to-end check that unit tests cannot give you. It is NOT part
+of the pytest suite because it creates a real sandbox (and costs real credit).
 
 Verifies the two things that matter most:
   1. register() runs under the real loader without raising.
   2. The injection probes report accurately, and `terminal.backend: novita`
      actually resolves to NovitaEnvironment through the core factory.
 
-Run:  ~/.hermes/hermes-agent/venv/bin/python probes/probe_plugin_load.py
+Run from the Hermes repo:
+  cd ~/.hermes/hermes-agent
+  venv/bin/python ~/.hermes/plugins/novita-sandbox/probes/integration_check.py
+
+Creates one real sandbox (task id "probe-load") and cleans up after itself.
 """
 
 import os

@@ -18,6 +18,7 @@ import logging
 import os
 import posixpath
 import shlex
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -99,12 +100,9 @@ def iter_paginator(paginator):
 
 
 def _ensure_sdk() -> None:
-    """Import the SDK, installing it first if Hermes' lazy-deps can."""
-    try:
-        import novita_sandbox  # noqa: F401
+    """Make the SDK importable, installing it first if Hermes' lazy-deps can."""
+    if _config.sdk_available():
         return
-    except ImportError:
-        pass
 
     # Preferred: the injector registers a terminal.novita group in
     # tools.lazy_deps.LAZY_DEPS, which gives us Hermes' allowlist + TTY prompt.
@@ -115,15 +113,15 @@ def _ensure_sdk() -> None:
     except Exception as e:  # noqa: BLE001
         logger.debug("novita: lazy_deps install path unavailable: %s", e)
 
-    try:
-        import novita_sandbox  # noqa: F401
-    except ImportError as e:
-        raise ImportError(
-            "novita-sandbox is not installed.\n"
-            "Install it with:\n"
-            f"  uv pip install --python {os.sys.executable} 'novita-sandbox>=2.1.0,<3'\n"
-            "or run:  hermes novita-sandbox setup"
-        ) from e
+    if _config.sdk_available():
+        return
+
+    raise ImportError(
+        "novita-sandbox is not installed.\n"
+        "Install it with:\n"
+        f"  uv pip install --python {sys.executable} 'novita-sandbox>=2.1.0,<3'\n"
+        "or run:  hermes novita-sandbox setup"
+    )
 
 
 class NovitaEnvironment(BaseEnvironment):
@@ -145,8 +143,6 @@ class NovitaEnvironment(BaseEnvironment):
         template: str | None = None,
         cwd: str = "/root",
         timeout: int = 60,
-        cpu: int | None = None,
-        memory: int | None = None,
         persistent_filesystem: bool = True,
         task_id: str = "default",
     ):
@@ -160,20 +156,10 @@ class NovitaEnvironment(BaseEnvironment):
         self._lifetime = _config.get_int_setting("novita_timeout", 3600)
         self._refresh_window = _config.get_int_setting("novita_refresh_window", 3600)
 
-        # cpu/memory are accepted for signature parity with the other backends'
-        # factory call, but the Novita API cannot apply them at create time and
-        # runtime mutation returns HTTP 500 (spec 12.3). Sizing is baked into
-        # the template.
-        for label, requested, key in (
-            ("cpu", cpu, "container_cpu"),
-            ("memory", memory, "container_memory"),
-        ):
-            if requested is None:
-                continue
-            configured = _config.get_int_setting(key, requested)
-            if configured != requested:
-                logger.debug("novita: ignoring %s=%s (template-baked)", label, requested)
-
+        # No cpu/memory parameters: the Novita API cannot set resources at
+        # create time, and runtime mutation (hotplug_memory / resize) returns
+        # HTTP 500, so sizing is baked into the template (design spec 12.3).
+        # container_cpu / container_memory are read only by `install-template`.
         self._lock = threading.Lock()
         self._sandbox = None
         self._client = None

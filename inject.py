@@ -87,20 +87,11 @@ class InjectionReport:
 
 
 def hermes_version() -> str:
-    for getter in (
-        lambda: __import__("importlib.metadata", fromlist=["version"]).version("hermes-agent"),
-    ):
-        try:
-            value = getter()
-            if value:
-                return str(value)
-        except Exception:  # noqa: BLE001
-            pass
+    """The installed Hermes version, or "unknown"."""
     try:
-        from hermes_cli.build_info import get_build_info  # type: ignore
+        from importlib.metadata import version
 
-        info = get_build_info() or {}
-        return str(info.get("version") or "unknown")
+        return str(version("hermes-agent"))
     except Exception:  # noqa: BLE001
         return "unknown"
 
@@ -191,14 +182,11 @@ def _patch_factory(report: InjectionReport) -> None:
 
 
 def _novita_reachable() -> bool:
+    """Cheap pre-flight for the terminal tool's availability check."""
     try:
         from . import config as _config
 
-        if not _config.get_api_key():
-            return False
-        import novita_sandbox  # noqa: F401
-
-        return True
+        return bool(_config.get_api_key()) and _config.sdk_available()
     except Exception:  # noqa: BLE001
         return False
 
